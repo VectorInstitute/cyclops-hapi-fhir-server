@@ -1,5 +1,6 @@
 package ca.uhn.fhir.jpa.starter.common;
 
+import ca.uhn.fhir.batch2.config.Batch2JobRegisterer;
 import ca.uhn.fhir.batch2.coordinator.JobDefinitionRegistry;
 import ca.uhn.fhir.batch2.jobs.export.BulkDataExportProvider;
 import ca.uhn.fhir.batch2.jobs.imprt.BulkDataImportProvider;
@@ -28,8 +29,10 @@ import ca.uhn.fhir.jpa.dao.search.IHSearchSortHelper;
 import ca.uhn.fhir.jpa.delete.ThreadSafeResourceDeleterSvc;
 import ca.uhn.fhir.jpa.graphql.GraphQLProvider;
 import ca.uhn.fhir.jpa.interceptor.CascadingDeleteInterceptor;
+import ca.uhn.fhir.jpa.interceptor.UserRequestRetryVersionConflictsInterceptor;
 import ca.uhn.fhir.jpa.interceptor.validation.RepositoryValidatingInterceptor;
 import ca.uhn.fhir.jpa.ips.provider.IpsOperationProvider;
+import ca.uhn.fhir.jpa.model.config.SubscriptionSettings;
 import ca.uhn.fhir.jpa.packages.IPackageInstallerSvc;
 import ca.uhn.fhir.jpa.packages.PackageInstallationSpec;
 import ca.uhn.fhir.jpa.partition.PartitionManagementProvider;
@@ -44,7 +47,6 @@ import ca.uhn.fhir.jpa.starter.annotations.OnImplementationGuidesPresent;
 import ca.uhn.fhir.jpa.starter.common.validation.IRepositoryValidationInterceptorFactory;
 import ca.uhn.fhir.jpa.starter.ig.IImplementationGuideOperationProvider;
 import ca.uhn.fhir.jpa.starter.util.EnvironmentHelper;
-import ca.uhn.fhir.jpa.starter.ig.IImplementationGuideOperationProvider;
 import ca.uhn.fhir.jpa.subscription.util.SubscriptionDebugLogInterceptor;
 import ca.uhn.fhir.jpa.util.ResourceCountCache;
 import ca.uhn.fhir.jpa.validation.JpaValidationSupportChain;
@@ -64,6 +66,8 @@ import ca.uhn.fhir.validation.ResultSeverityEnum;
 import com.google.common.base.Strings;
 import jakarta.persistence.EntityManagerFactory;
 import org.hl7.fhir.common.hapi.validation.support.CachingValidationSupport;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.NoSuchBeanDefinitionException;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.config.ConfigurableListableBeanFactory;
@@ -87,7 +91,7 @@ import static ca.uhn.fhir.jpa.starter.common.validation.IRepositoryValidationInt
 @Import(ThreadPoolFactoryConfig.class)
 public class StarterJpaConfig {
 
-	private static final org.slf4j.Logger ourLog = org.slf4j.LoggerFactory.getLogger(StarterJpaConfig.class);
+	private static final Logger ourLog = LoggerFactory.getLogger(StarterJpaConfig.class);
 
 	@Bean
 	public IFulltextSearchSvc fullTextSearchSvc() {
@@ -189,11 +193,11 @@ public class StarterJpaConfig {
 	@Primary
 	@Conditional(OnImplementationGuidesPresent.class)
 	public IPackageInstallerSvc packageInstaller(
-			AppProperties appProperties,
-			JobDefinition<ReindexJobParameters> reindexJobParametersJobDefinition,
-			JobDefinitionRegistry jobDefinitionRegistry,
-			IPackageInstallerSvc packageInstallerSvc) {
-		jobDefinitionRegistry.addJobDefinitionIfNotRegistered(reindexJobParametersJobDefinition);
+		AppProperties appProperties,
+		IPackageInstallerSvc packageInstallerSvc,
+		Batch2JobRegisterer batch2JobRegisterer) {
+
+		batch2JobRegisterer.start();
 
 		if (appProperties.getImplementationGuides() != null) {
 			Map<String, PackageInstallationSpec> guides = appProperties.getImplementationGuides();
@@ -252,6 +256,7 @@ public class StarterJpaConfig {
 			IJpaSystemProvider jpaSystemProvider,
 			ResourceProviderFactory resourceProviderFactory,
 			JpaStorageSettings jpaStorageSettings,
+			SubscriptionSettings subscriptionSettings,
 			ISearchParamRegistry searchParamRegistry,
 			IValidationSupport theValidationSupport,
 			DatabaseBackedPagingProvider databaseBackedPagingProvider,
@@ -378,7 +383,7 @@ public class StarterJpaConfig {
 
 		corsInterceptor.ifPresent(fhirServer::registerInterceptor);
 
-		if (jpaStorageSettings.getSupportedSubscriptionTypes().size() > 0) {
+		if (!subscriptionSettings.getSupportedSubscriptionTypes().isEmpty()) {
 			// Subscription debug logging
 			fhirServer.registerInterceptor(new SubscriptionDebugLogInterceptor());
 		}
@@ -453,6 +458,10 @@ public class StarterJpaConfig {
 		// register the IPS Provider
 		if (!theIpsOperationProvider.isEmpty()) {
 			fhirServer.registerProvider(theIpsOperationProvider.get());
+		}
+
+		if (appProperties.getUserRequestRetryVersionConflictsInterceptorEnabled() ) {
+			fhirServer.registerInterceptor(new UserRequestRetryVersionConflictsInterceptor());
 		}
 
 		// register custom providers
